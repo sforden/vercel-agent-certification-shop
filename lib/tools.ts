@@ -1,12 +1,23 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { ApiRequestError, createReturn, getBackOfficeReturns, getBackOfficeSales, getBackOfficeStock, getBackOfficeSupportTickets, getCategories, getOrder, getProductById, getProductStock, getProducts, preauthorizeRefund, notifyReturnInProcess } from "@/lib/api";
+import {
+  ApiRequestError,
+  getBackOfficeReturns,
+  getBackOfficeSales,
+  getBackOfficeStock,
+  getBackOfficeSupportTickets,
+  getCategories,
+  getOrder,
+  getProductById,
+  getProductStock,
+  getProducts,
+} from "@/lib/api";
 import { start } from "workflow/api";
 import { returnFlow } from "./workflows/return-flow";
 import { createOrGetSandbox, SANDBOX_NAME } from "@/lib/sandbox";
 
 export const searchProducts = tool({
-  description: `Search the Vercel swag store product catalog. Use this whenever the user asks about products, what the store sells, or wants recommendations. Optionally narrow results to a single category.`,
+  description: `Search the Vercel swag store product catalog. Use this whenever the user asks about products, what the store sells, or wants recommendations. Optionally narrow results to a single category. Omit query and category to browse the full catalog.`,
   inputSchema: z.object({
     query: z
       .string()
@@ -20,15 +31,32 @@ export const searchProducts = tool({
       .describe(
         `Optional category slug to filter results. Only set this when the user clearly wants a specific category. Use the getAllCategories tool to get all valid categories.`,
       ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe(
+        `Max products to return. Defaults to 10. Use a higher value when the user wants to browse everything.`,
+      ),
+    page: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(`Page number for browsing beyond the first set of results.`),
   }),
-  execute: async ({ query, category }) => {
+  execute: async ({ query, category, limit, page }) => {
     "use step";
     try {
       const products = await getProducts({
         search: query,
         category,
-        limit: 10,
+        limit: limit ?? 10,
+        page,
       });
+
       return {
         count: products.length,
         products: products.map((p) => ({
@@ -76,9 +104,7 @@ export const getAllCategories = tool({
 export const returnOrder = tool({
   description: `File a return for one of the user's past orders. The user must provide an order ID and a reason. Example order IDs: 11111, 22222, 33333.`,
   inputSchema: z.object({
-    orderId: z
-      .string()
-      .describe("The order ID the user wants to return."),
+    orderId: z.string().describe("The order ID the user wants to return."),
     reason: z
       .string()
       .min(10)
@@ -87,13 +113,23 @@ export const returnOrder = tool({
   }),
   execute: async ({ orderId, reason }) => {
     "use step";
+    try {
+      await getOrder(orderId);
+    } catch (err) {
+      const message =
+        err instanceof ApiRequestError ? err.message : "Unknown error";
+      return { error: `Could not find order ${orderId}: ${message}` };
+    }
     const run = await start(returnFlow, [orderId, reason]);
-    return { runId: run.runId, message: `Return request received for order ${orderId}.` };
+    return {
+      runId: run.runId,
+      message: `Return started for order ${orderId}. The customer will be notified and the refund pre-authorized.`,
+    };
   },
 });
 
 export const getProductDetails = tool({
-  description: `Fetch the full details for a single product by its ID or slug, including every image, the full description, price, tags, and live stock levels. Use this when the user asks about a specific item (e.g. "tell me more about the black hoodie") — prefer it over searchProducts once you know which product they mean, since searchProducts only returns a summary.`,
+  description: `Fetch the full details for a single product by its ID or slug, including every image, the full description, price, tags, available options (such as sizes or colors), and live stock levels. Use this when the user asks about a specific item (e.g. "tell me more about the black hoodie"). Prefer it over searchProducts once you know which product they mean, since searchProducts only returns a summary.`,
   inputSchema: z.object({
     productId: z
       .string()
@@ -109,16 +145,7 @@ export const getProductDetails = tool({
         getProductStock(productId),
       ]);
       return {
-        id: product.id,
-        name: product.name,
-        slug: product.slug,
-        description: product.description,
-        price: product.price,
-        currency: product.currency,
-        category: product.category,
-        images: product.images,
-        tags: product.tags,
-        featured: product.featured,
+        ...product,
         stock: stock.stock,
         inStock: stock.inStock,
         lowStock: stock.lowStock,
@@ -132,7 +159,7 @@ export const getProductDetails = tool({
 });
 
 export const getSupportTickets = tool({
-  description: `List support tickets from the back office within a date range. Each ticket includes status, priority, category, assignee (staff username or null when unassigned), the related customer/order, and timestamps. Use this for triaging the support queue, spotting spikes in a category, checking workload by assignee, or auditing unresolved urgent tickets. History covers ~last 180 days. Summarize across the rows in your reply rather than dumping them; for more than ~10 rows of arithmetic, note that exact joins and aggregates are limited until a sandbox tool is added.`,
+  description: `List support tickets from the back office within a date range. Each ticket includes status, priority, category, assignee (staff username or null when unassigned), the related customer/order, and timestamps. Use this for triaging the support queue, spotting spikes in a category, checking workload by assignee, or auditing unresolved urgent tickets. History covers ~last 180 days. Summarize across the rows in your reply rather than dumping them. For aggregates or joins over more than ~10 rows, compute them with the bash tool.`,
   inputSchema: z.object({
     from: z
       .string()
@@ -166,15 +193,7 @@ export const getSupportTickets = tool({
       ),
     limit: z.number().int().min(1).max(500).optional(),
   }),
-  execute: async ({
-    from,
-    to,
-    status,
-    priority,
-    category,
-    assignee,
-    limit,
-  }) => {
+  execute: async ({ from, to, status, priority, category, assignee, limit }) => {
     "use step";
     try {
       const { data, meta } = await getBackOfficeSupportTickets({
@@ -196,7 +215,7 @@ export const getSupportTickets = tool({
 });
 
 export const getReturnsHistory = tool({
-  description: `List historical returns from the back office within a date range. Each entry includes the items returned, the decision (approved/rejected/needs_info), refund amount in cents (divide by 100 for dollar amounts in your reply), and a summary of the related order. Use this for return triage, refund auditing, or identifying products with high return volumes. History covers ~last 180 days. Summarize across the returned rows in your reply rather than dumping them; for more than ~10 rows of arithmetic, note that exact joins and aggregates are limited until a sandbox tool is added.`,
+  description: `List historical returns from the back office within a date range. Each entry includes the items returned, the decision (approved/rejected/needs_info), refund amount in cents (divide by 100 for dollar amounts in your reply), and a summary of the related order. Use this for return triage, refund auditing, or identifying products with high return volumes. History covers ~last 180 days. Summarize across the returned rows in your reply rather than dumping them. For aggregates or joins over more than ~10 rows, compute them with the bash tool.`,
   inputSchema: z.object({
     from: z
       .string()
@@ -271,7 +290,7 @@ export const getInventoryStock = tool({
 });
 
 export const getSalesAnalytics = tool({
-  description: `Sales totals by product within a date range. Each row reports unitsSold, ordersCount, and revenue in cents (divide by 100 for dollar amounts in your reply). Results are sorted by unitsSold descending. Pair with getReturnsHistory to compute per-product return rates. Sales data covers ~last 180 days. Summarize across the rows in your reply rather than dumping them; for more than ~10 rows of arithmetic, note that exact joins and aggregates are limited until a sandbox tool is added.`,
+  description: `Sales totals by product within a date range. Each row reports unitsSold, ordersCount, and revenue in cents (divide by 100 for dollar amounts in your reply). Results are sorted by unitsSold descending. Pair with getReturnsHistory to compute per-product return rates. Sales data covers ~last 180 days. Summarize across the rows in your reply rather than dumping them. For aggregates or joins over more than ~10 rows, compute them with the bash tool.`,
   inputSchema: z.object({
     from: z
       .string()
@@ -308,12 +327,20 @@ export const bash = tool({
   }),
   execute: async ({ command }) => {
     "use step";
-    const sandbox = await createOrGetSandbox(SANDBOX_NAME);
-    const result = await sandbox.runCommand("bash", ["-lc", command]);
-    return {
-      stdout: await result.stdout(),
-      stderr: await result.stderr(),
-      exitCode: result.exitCode,
-    };
+    try {
+      const sandbox = await createOrGetSandbox(SANDBOX_NAME);
+      const result = await sandbox.runCommand("bash", ["-lc", command]);
+      return {
+        stdout: await result.stdout(),
+        stderr: await result.stderr(),
+        exitCode: result.exitCode,
+      };
+    } catch (err) {
+      return {
+        stdout: "",
+        stderr: err instanceof Error ? err.message : "Sandbox error",
+        exitCode: 1,
+      };
+    }
   },
 });

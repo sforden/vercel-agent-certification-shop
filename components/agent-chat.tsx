@@ -30,29 +30,31 @@ export function AgentChat() {
     return localStorage.getItem("active-workflow-run-id") ?? undefined;
   }, []);
 
-  const { messages, error, sendMessage } = useChat<ShoppingAgentUIMessage>({
-    resume: Boolean(activeRunId),
-    transport: new WorkflowChatTransport({
-      api: "/api/chat",
-      onChatSendMessage: (response) => {
-        const runId = response.headers.get("x-workflow-run-id");
-        if (runId) localStorage.setItem("active-workflow-run-id", runId);
-      },
-      onChatEnd: () => localStorage.removeItem("active-workflow-run-id"),
-      prepareReconnectToStreamRequest: ({ api, ...rest }) => {
-        const runId = localStorage.getItem("active-workflow-run-id");
-        if (!runId) throw new Error("No active workflow run ID found");
-        return { ...rest, api: `/api/chat/${encodeURIComponent(runId)}/stream` };
-      },
-    }),
-  });
+  const { messages, error, sendMessage, status, stop } =
+    useChat<ShoppingAgentUIMessage>({
+      resume: Boolean(activeRunId),
+      transport: new WorkflowChatTransport({
+        api: "/api/chat",
+        onChatSendMessage: (response) => {
+          const runId = response.headers.get("x-workflow-run-id");
+          if (runId) localStorage.setItem("active-workflow-run-id", runId);
+        },
+        onChatEnd: () => localStorage.removeItem("active-workflow-run-id"),
+        prepareReconnectToStreamRequest: ({ api, ...rest }) => {
+          const runId = localStorage.getItem("active-workflow-run-id");
+          if (!runId) throw new Error("No active workflow run ID found");
+          return { ...rest, api: `/api/chat/${encodeURIComponent(runId)}/stream` };
+        },
+      }),
+    });
+
+  const isBusy = status === "submitted" || status === "streaming";
 
   const handleSubmit = (message: PromptInputMessage) => {
+    if (!input.trim() || isBusy) return;
     sendMessage({ text: input });
     setInput("");
   };
-
-  if (error) return <div>{error.message}</div>;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -70,17 +72,21 @@ export function AgentChat() {
                     </Message>
                   );
                 case "tool-searchProducts":
-                  return (
-                    <AgentProductList key={`${m.id}-${i}`} invocation={p} />
-                  );
+                  return <AgentProductList key={`${m.id}-${i}`} invocation={p} />;
                 case "tool-getProductDetails":
-                  return (
-                    <AgentProductCard key={`${m.id}-${i}`} invocation={p} />
-                  );
+                  return <AgentProductCard key={`${m.id}-${i}`} invocation={p} />;
                 default:
                   return null;
               }
             }),
+          )}
+          {error && (
+            <div
+              role="alert"
+              className="my-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+            >
+              Something went wrong. Please try sending your message again.
+            </div>
           )}
         </ConversationContent>
         <ConversationScrollButton />
@@ -97,7 +103,11 @@ export function AgentChat() {
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools />
-            <PromptInputSubmit status="ready" disabled={!input.trim()} />
+            <PromptInputSubmit
+              status={status}
+              onClick={isBusy ? stop : undefined}
+              disabled={!isBusy && !input.trim()}
+            />
           </PromptInputFooter>
         </PromptInput>
       </div>

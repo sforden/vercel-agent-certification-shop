@@ -22,6 +22,14 @@ export function AgentProductCard({ invocation }: AgentProductCardProps) {
     );
   }
 
+  if (invocation.state === "output-error") {
+    return (
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+        Sorry, that lookup failed. Please try again.
+      </div>
+    );
+  }
+
   if (invocation.state !== "output-available") return null;
 
   const output = invocation.output;
@@ -59,6 +67,21 @@ export function AgentProductCard({ invocation }: AgentProductCardProps) {
             </h3>
             <p className="text-sm text-muted-foreground">
               {formatPrice(output.price, output.currency)}
+            </p>
+            <p
+              className={`text-xs font-medium ${
+                !output.inStock
+                  ? "text-destructive"
+                  : output.lowStock
+                    ? "text-amber-600"
+                    : "text-muted-foreground"
+              }`}
+            >
+              {!output.inStock
+                ? "Out of stock"
+                : output.lowStock
+                  ? `Only ${output.stock} left`
+                  : "In stock"}
             </p>
           </div>
         </div>
